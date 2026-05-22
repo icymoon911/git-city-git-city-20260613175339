@@ -299,24 +299,20 @@ export default class FlyServer implements Party.Server {
     }
 
     if (msg.type === "hit") {
-      const reject = (reason: string) => {
-        console.log(`[FORCE PUSH] hit rejected: ${reason} shooter=${pilot.login} target=${msg.targetId?.slice(0, 8)}`);
-      };
-      if (!pilot.pvpEnabled) { reject("shooter pvp off"); return; }
-      if (isDowned(pilot, now)) { reject("shooter downed"); return; }
-      if (typeof msg.targetId !== "string" || msg.targetId.length === 0 || msg.targetId.length > 128) { reject("bad targetId"); return; }
-      if (msg.targetId === id) { reject("self target"); return; }
-      if (!canReportHit(pilot, now)) { reject("rate limit"); return; }
+      if (!pilot.pvpEnabled) return;
+      if (isDowned(pilot, now)) return;
+      if (typeof msg.targetId !== "string" || msg.targetId.length === 0 || msg.targetId.length > 128) return;
+      if (msg.targetId === id) return;
+      if (!canReportHit(pilot, now)) return;
 
       const target = this.pilots.get(msg.targetId);
-      if (!target) { reject("target not found"); return; }
-      if (!target.pvpEnabled) { reject("target pvp off"); return; }
-      if (isInvuln(target, now)) { reject("target invuln"); return; }
-      if (isDowned(target, now)) { reject("target downed"); return; }
+      if (!target) return;
+      if (!target.pvpEnabled) return;
+      if (isInvuln(target, now)) return;
+      if (isDowned(target, now)) return;
 
       const dist = distance(pilot, target);
-      if (dist > PROJECTILE_RANGE * 1.5) { reject(`out of range ${dist.toFixed(0)}`); return; }
-      console.log(`[FORCE PUSH] hit accepted shooter=${pilot.login} target=${target.login} dist=${dist.toFixed(0)} newHp=${target.hp - 1}`);
+      if (dist > PROJECTILE_RANGE * 1.5) return;
 
       pilot.recentHits.push(now);
       target.hp = Math.max(0, target.hp - 1);
@@ -387,11 +383,11 @@ export default class FlyServer implements Party.Server {
     const secret = (this.room.env as Record<string, unknown>).FORCE_PUSH_HMAC_SECRET as string | undefined;
     if (!secret) {
       // Fail closed: if the secret isn't configured we do not broadcast a
-      // kill token, so the API can never credit XP. Logged once is enough.
-      console.warn(`[FORCE PUSH] FORCE_PUSH_HMAC_SECRET MISSING — kill ${args.killerLogin}→${args.victimLogin} NOT broadcast. Set the env var so kills register on screen.`);
+      // kill token, so the API can never credit XP. Warn (not every kill,
+      // just on setup misconfiguration).
+      console.warn(`[FORCE PUSH] FORCE_PUSH_HMAC_SECRET MISSING — kill not broadcast`);
       return;
     }
-    console.log(`[FORCE PUSH] kill confirmed ${args.killerLogin}→${args.victimLogin} hh=${args.happyHour}`);
     let killToken: string;
     try {
       killToken = await signKillToken(

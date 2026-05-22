@@ -13,7 +13,9 @@ const PROJECTILE_LIFE_MS = 800;
 const HIT_RADIUS = 18;
 const MUZZLE_FLASH_MS = 120;
 const HIT_THROTTLE_MS = 200;
-const DEBUG_HITS = true; // TEMP: log to console while debugging hit registration
+// Flip to `true` only when debugging hit registration. Leaving logs on
+// in a 60fps hot path with many players nearby tanks performance.
+const DEBUG_HITS = false;
 
 interface Props {
   projectilesRef: React.MutableRefObject<Map<string, ActiveProjectile>>;

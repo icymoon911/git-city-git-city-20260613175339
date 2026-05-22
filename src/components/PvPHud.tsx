@@ -1,8 +1,23 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import type { RemotePilot, SelfPvpState, KillFeedEntry } from "@/lib/useFlyPresence";
 import { getHappyHourStatus, formatCountdown } from "@/lib/happyHour";
+
+// Dev-humor tips shown on the death screen — rotated randomly so each
+// death feels a little different.
+const DEATH_TIPS = [
+  "tip: shielded for 3s after reboot",
+  "tip: toggle Force Push off in the top bar to fly safe",
+  "tip: 2× XP during Force Push Happy Hour",
+  "have you tried turning it off and on again?",
+  "stack overflow at line 3",
+  "panic: runtime error",
+  "segmentation fault (core dumped)",
+  "exit code 137 — out of memory",
+  "git revert HEAD next time",
+  "did not match any files known to git",
+];
 
 // All visual elements here follow the city pattern:
 //   border-[3px] border-border bg-bg/70 backdrop-blur-sm
@@ -12,8 +27,10 @@ import { getHappyHourStatus, formatCountdown } from "@/lib/happyHour";
 
 export interface SelfPosLike { x: number; z: number; }
 
+const CREAM = "#e8dcc8";
 const CREAM_DARK = "#c8b89c";
 const MUTED = "#8c8c9c";
+const BORDER = "#2a2a30";
 const LIME = "#c8e64a";
 const DAMAGE = "#d44";
 
@@ -69,11 +86,32 @@ export default function PvPHud({
   selfYawRef,
 }: PvPHudProps) {
   const [snap, setSnap] = useState<Snapshot>(emptySnapshot);
+  const [deathTip, setDeathTip] = useState("");
+  const [killerNameOnDeath, setKillerNameOnDeath] = useState<string | null>(null);
+  const [respawnedAt, setRespawnedAt] = useState(0);
+  const wasDownedRef = useRef(false);
 
   useEffect(() => {
     const interval = setInterval(() => {
       const s = selfStateRef.current;
       const attacker = s.lastAttackerId ? pilotsRef.current.get(s.lastAttackerId) : null;
+      const nowMs = Date.now();
+      const isDownedNow = s.downedUntil > nowMs;
+
+      // Edge transitions: dying / respawning
+      if (isDownedNow !== wasDownedRef.current) {
+        if (isDownedNow) {
+          // Just died — pick a tip and freeze the killer name so the
+          // overlay shows who killed us even if lastAttackerId rotates.
+          setDeathTip(DEATH_TIPS[Math.floor(Math.random() * DEATH_TIPS.length)]);
+          setKillerNameOnDeath(attacker ? attacker.login : null);
+        } else {
+          // Just respawned — flash the "DEPLOYED" confirmation
+          setRespawnedAt(nowMs);
+        }
+        wasDownedRef.current = isDownedNow;
+      }
+
       setSnap({
         lastAttackerId: s.lastAttackerId,
         lastAttackerAt: s.lastAttackerAt,
@@ -84,7 +122,7 @@ export default function PvPHud({
         lastDamageAt: s.lastDamageAt,
         downedUntil: s.downedUntil,
         killFeed: s.killFeed,
-        now: Date.now(),
+        now: nowMs,
         selfX: selfPosRef?.current.x ?? 0,
         selfZ: selfPosRef?.current.z ?? 0,
         selfYaw: selfYawRef?.current ?? 0,
@@ -270,34 +308,178 @@ export default function PvPHud({
         </div>
       )}
 
-      {/* ─── BUILD FAILED overlay on death ───── */}
-      {isDowned && (
-        <div
-          className="pointer-events-none fixed inset-0 z-[60] flex items-center justify-center"
-          style={{
-            background: "rgba(0, 0, 0, 0.6)",
-            backdropFilter: "blur(2px)",
-          }}
-        >
-          <div className="border-[3px] bg-bg/80 px-8 py-6 text-center backdrop-blur-sm"
-               style={{ borderColor: DAMAGE }}>
+      {/* ─── BUILD FAILED overlay on death — terminal-style ─── */}
+      {isDowned && (() => {
+        const secsLeft = Math.max(0, Math.ceil((snap.downedUntil - snap.now) / 1000));
+        return (
+          <div
+            className="pointer-events-none fixed inset-0 z-[60] flex items-center justify-center"
+            style={{
+              background: "rgba(0, 0, 0, 0.78)",
+              backdropFilter: "blur(3px)",
+              animation: "pvp-death-in 0.18s ease-out",
+            }}
+          >
+            {/* Subtle red scanline at the top, like a terminal error */}
             <div
+              className="pointer-events-none absolute inset-x-0 top-0"
               style={{
+                height: 2,
+                background: `linear-gradient(90deg, transparent 0%, ${DAMAGE} 50%, transparent 100%)`,
+                opacity: 0.7,
+              }}
+            />
+            <div
+              className="text-center"
+              style={{
+                background: "rgba(28,28,32,0.95)",
+                border: `3px solid ${DAMAGE}`,
+                padding: "28px 56px",
+                minWidth: 360,
                 fontFamily: "Silkscreen, monospace",
-                color: DAMAGE,
-                fontSize: 36,
-                letterSpacing: "0.2em",
-                textTransform: "uppercase",
               }}
             >
-              Build Failed
+              {/* Header — like a process crash banner */}
+              <div
+                style={{
+                  fontSize: 9,
+                  color: DAMAGE,
+                  letterSpacing: "0.3em",
+                  opacity: 0.7,
+                  marginBottom: 6,
+                }}
+              >
+                ─── error ───
+              </div>
+              {/* Main "BUILD FAILED" */}
+              <div
+                style={{
+                  color: DAMAGE,
+                  fontSize: 42,
+                  letterSpacing: "0.2em",
+                  textTransform: "uppercase",
+                  lineHeight: 1,
+                  textShadow: `0 0 12px ${DAMAGE}55`,
+                }}
+              >
+                Build Failed
+              </div>
+              {/* Killer attribution — only if we know who did it */}
+              {killerNameOnDeath && (
+                <div
+                  style={{
+                    marginTop: 14,
+                    fontSize: 11,
+                    color: CREAM,
+                    letterSpacing: "0.12em",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  killed by{" "}
+                  <span style={{ color: DAMAGE, fontWeight: "bold" }}>
+                    @{killerNameOnDeath}
+                  </span>
+                </div>
+              )}
+              {/* Animated countdown */}
+              <div
+                style={{
+                  marginTop: 18,
+                  display: "flex",
+                  alignItems: "baseline",
+                  justifyContent: "center",
+                  gap: 10,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 10,
+                    color: MUTED,
+                    letterSpacing: "0.15em",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  rebooting in
+                </span>
+                <span
+                  key={secsLeft}
+                  style={{
+                    fontSize: 28,
+                    color: CREAM,
+                    letterSpacing: "0.05em",
+                    minWidth: 22,
+                    display: "inline-block",
+                    animation: "pvp-countdown-pulse 0.4s ease-out",
+                  }}
+                >
+                  {secsLeft}
+                </span>
+              </div>
+              {/* Dev-humor tip — rotates per death */}
+              {deathTip && (
+                <div
+                  style={{
+                    marginTop: 18,
+                    paddingTop: 12,
+                    borderTop: `1px solid ${BORDER}`,
+                    fontSize: 9,
+                    color: MUTED,
+                    letterSpacing: "0.08em",
+                    fontStyle: "italic",
+                  }}
+                >
+                  {deathTip}
+                </div>
+              )}
             </div>
-            <div className="mt-2 text-[10px] uppercase text-muted tracking-wider">
-              Respawning in 5s
-            </div>
+          </div>
+        );
+      })()}
+
+      {/* ─── DEPLOYED — brief confirmation flash when respawn lands ── */}
+      {respawnedAt > 0 && snap.now - respawnedAt < 1400 && (
+        <div
+          className="pointer-events-none fixed left-1/2 top-1/2 z-[58] -translate-x-1/2 -translate-y-1/2 transform"
+          style={{
+            animation: "pvp-deployed 1.4s ease-out forwards",
+          }}
+        >
+          <div
+            style={{
+              background: "rgba(28,28,32,0.92)",
+              border: `3px solid ${LIME}`,
+              padding: "10px 24px",
+              fontFamily: "Silkscreen, monospace",
+              fontSize: 16,
+              color: LIME,
+              letterSpacing: "0.2em",
+              textTransform: "uppercase",
+              textShadow: `0 0 10px ${LIME}55`,
+            }}
+          >
+            ⚡ Deployed
           </div>
         </div>
       )}
+
+      <style jsx global>{`
+        @keyframes pvp-death-in {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        @keyframes pvp-countdown-pulse {
+          0% { transform: scale(1.4); opacity: 0; }
+          40% { transform: scale(1); opacity: 1; }
+          100% { transform: scale(1); opacity: 1; }
+        }
+        @keyframes pvp-deployed {
+          0% { opacity: 0; transform: translate(-50%, -50%) scale(0.7); }
+          15% { opacity: 1; transform: translate(-50%, -50%) scale(1.1); }
+          25% { transform: translate(-50%, -50%) scale(1); }
+          80% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+          100% { opacity: 0; transform: translate(-50%, -50%) scale(1); }
+        }
+      `}</style>
     </>
   );
 }

@@ -263,9 +263,6 @@ export function useFlyPresence(
       }
 
       if (msg.type === "hit") {
-        console.log(
-          `[FORCE PUSH] server hit msg → target=${msg.targetId.slice(0, 8)} shooter=${msg.shooterId.slice(0, 8)} newHp=${msg.newHp} (me=${meId?.slice(0, 8)})`,
-        );
         if (meId && msg.targetId === meId) {
           selfStateRef.current.hp = msg.newHp;
           selfStateRef.current.lastAttackerId = msg.shooterId;
@@ -283,9 +280,6 @@ export function useFlyPresence(
       }
 
       if (msg.type === "kill") {
-        console.log(
-          `[FORCE PUSH] server kill msg → killer=${msg.killerLogin} victim=${msg.victimLogin} hh=${msg.happyHour} (me=${meId?.slice(0, 8)})`,
-        );
         // Always add to the kill feed — every player sees who killed who.
         const killerWasSelf = meId === msg.killerId;
         const victimWasSelf = meId === msg.victimId;
@@ -335,9 +329,6 @@ export function useFlyPresence(
       }
 
       if (msg.type === "respawn") {
-        console.log(
-          `[FORCE PUSH] server respawn msg → id=${msg.id.slice(0, 8)} at=(${msg.x.toFixed(0)},${msg.z.toFixed(0)}) (me=${meId?.slice(0, 8)})`,
-        );
         if (meId && msg.id === meId) {
           selfStateRef.current.hp = 3;
           selfStateRef.current.downedUntil = 0;

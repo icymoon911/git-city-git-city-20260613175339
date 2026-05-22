@@ -606,7 +606,7 @@ const _idealLook = new THREE.Vector3();
 const _blendedPos = new THREE.Vector3();
 const _yAxis = new THREE.Vector3(0, 1, 0);
 
-function VehicleFlight({ onExit, onHud, onPause, pauseSignal = 0, hasOverlay = false, startPaused = false, vehicleType = "airplane", posRef, cityRadius = 3500, isMobile = false, onJoystickState, boostActive = false, brakeActive = false, onFlyMove, onShoot, canShoot = false, pendingRespawnRef }: { onExit: () => void; onHud: (s: number, a: number, x: number, z: number, yaw: number) => void; onPause: (paused: boolean) => void; pauseSignal?: number; hasOverlay?: boolean; startPaused?: boolean; vehicleType?: string; posRef?: React.MutableRefObject<THREE.Vector3>; cityRadius?: number; isMobile?: boolean; onJoystickState?: (state: { baseX: number; baseY: number; dx: number; dy: number } | null) => void; boostActive?: boolean; brakeActive?: boolean; onFlyMove?: (x: number, y: number, z: number, yaw: number, bank: number) => void; onShoot?: (x: number, y: number, z: number, dirX: number, dirY: number, dirZ: number) => void; canShoot?: boolean; pendingRespawnRef?: React.MutableRefObject<PendingRespawn | null> }) {
+function VehicleFlight({ onExit, onHud, onPause, pauseSignal = 0, hasOverlay = false, startPaused = false, vehicleType = "airplane", posRef, cityRadius = 3500, isMobile = false, onJoystickState, boostActive = false, brakeActive = false, onFlyMove, onShoot, canShoot = false, pendingRespawnRef, selfStateRef }: { onExit: () => void; onHud: (s: number, a: number, x: number, z: number, yaw: number) => void; onPause: (paused: boolean) => void; pauseSignal?: number; hasOverlay?: boolean; startPaused?: boolean; vehicleType?: string; posRef?: React.MutableRefObject<THREE.Vector3>; cityRadius?: number; isMobile?: boolean; onJoystickState?: (state: { baseX: number; baseY: number; dx: number; dy: number } | null) => void; boostActive?: boolean; brakeActive?: boolean; onFlyMove?: (x: number, y: number, z: number, yaw: number, bank: number) => void; onShoot?: (x: number, y: number, z: number, dirX: number, dirY: number, dirZ: number) => void; canShoot?: boolean; pendingRespawnRef?: React.MutableRefObject<PendingRespawn | null>; selfStateRef?: React.MutableRefObject<SelfPvpState> }) {
   const { camera } = useThree();
   const ref = useRef<THREE.Group>(null);
   const orbitRef = useRef<any>(null);
@@ -1070,9 +1070,14 @@ function VehicleFlight({ onExit, onHud, onPause, pauseSignal = 0, hasOverlay = f
     pitch.current += (targetPitch - pitch.current) * 6 * dt;
 
     if (ref.current) {
-      ref.current.visible = true;
-      ref.current.position.copy(pos.current);
-      ref.current.rotation.set(pitch.current, yaw.current, bank.current, "YXZ");
+      // Hide the vehicle while downed — gives feedback that you actually
+      // died and prevents observers from seeing a ghost ship floating.
+      const downed = selfStateRef && selfStateRef.current.downedUntil > Date.now();
+      ref.current.visible = !downed;
+      if (!downed) {
+        ref.current.position.copy(pos.current);
+        ref.current.rotation.set(pitch.current, yaw.current, bank.current, "YXZ");
+      }
     }
 
     const camDist = 35 + flySpeed.current * 0.2;
@@ -2428,13 +2433,13 @@ export default function CityCanvas({ buildings, plazas, decorations, river, brid
 
           {!introMode && flyMode && (
             <>
-              <VehicleFlight onExit={onExitFly} onHud={onHud ?? (() => { })} onPause={onPause ?? (() => { })} pauseSignal={flyPauseSignal} hasOverlay={flyHasOverlay} startPaused={flyStartPaused} vehicleType={flyVehicle} posRef={flyPosRef} cityRadius={cityRadius} isMobile={isMobile} onJoystickState={onJoystickState} boostActive={flyBoostActive} brakeActive={flyBrakeActive} onFlyMove={onFlyMove} onShoot={flyOnShoot} canShoot={flyPvpEnabled === true} pendingRespawnRef={flyPendingRespawnRef} />
+              <VehicleFlight onExit={onExitFly} onHud={onHud ?? (() => { })} onPause={onPause ?? (() => { })} pauseSignal={flyPauseSignal} hasOverlay={flyHasOverlay} startPaused={flyStartPaused} vehicleType={flyVehicle} posRef={flyPosRef} cityRadius={cityRadius} isMobile={isMobile} onJoystickState={onJoystickState} boostActive={flyBoostActive} brakeActive={flyBrakeActive} onFlyMove={onFlyMove} onShoot={flyOnShoot} canShoot={flyPvpEnabled === true} pendingRespawnRef={flyPendingRespawnRef} selfStateRef={flySelfStateRef} />
               <SkyCollectibles playerPosRef={flyPosRef} accentColor={accentColor ?? "#6090e0"} onCollect={onCollect ?? (() => { })} cityRadius={cityRadius} />
             </>
           )}
 
           {/* Remote pilots visible in both explore and fly mode */}
-          {flyPilotsRef && <RemotePilots pilotsRef={flyPilotsRef} />}
+          {flyPilotsRef && <RemotePilots pilotsRef={flyPilotsRef} selfPosRef={flyPosRef} />}
 
           {/* PvP projectile swarm (only in fly mode) */}
           {flyMode && flyProjectilesRef && flyPilotsRef && flySelfStateRef && flyOnReportHit && (
