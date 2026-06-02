@@ -1,5 +1,6 @@
 "use client";
 
+import "@/lib/silenceThreeClockWarning";
 import { useState, useRef } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import type { Group } from "three";

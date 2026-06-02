@@ -1,5 +1,6 @@
 "use client";
 
+import "@/lib/silenceThreeClockWarning";
 import { useState, useRef, useMemo, useEffect, memo } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
