@@ -1,5 +1,6 @@
 import type { Party, Connection, ConnectionContext } from "partykit/server";
 import { signKillToken, randomNonce } from "./killToken";
+import { signBossDamageToken } from "./bossToken";
 
 // ─── Tunables ───────────────────────────────────────────────
 const MOVE_INTERVAL_MS = 80;
@@ -16,6 +17,22 @@ const INVULN_AFTER_SPAWN_MS = 3_000;
 const RESPAWN_DELAY_MS = 5_000;
 const RESPAWN_DISTANCE = 200;
 const KILL_TOKEN_TTL_MS = 30_000;
+
+// ─── Bug Invasion boss (live event) ─────────────────────────
+const BOSS_BASE_POS = { x: 0, y: 800, z: 0 };
+const BOSS_DAMAGE_PER_HIT = 30;
+const BOSS_MINION_BONUS = 50;
+const BOSS_DEFAULT_MAX_HP = 50_000;
+const BOSS_MAX_HP_CEILING = 2_000_000;
+const BOSS_MAX_HP_FLOOR = 5_000;
+const BOSS_HIT_MAX_DIST = 3_000; // loose: player must be near the boss
+const BOSS_SHOT_WINDOW_MS = 1_000;
+const BOSS_MAX_SHOTS_PER_WINDOW = 12; // boss + minion fire; generous
+const BOSS_BROADCAST_THROTTLE_MS = 200; // 5 Hz HP broadcast
+const DAMAGE_RECEIPT_THRESHOLD = 300; // issue a signed receipt every N damage
+const DAMAGE_RECEIPT_TTL_MS = 90_000;
+const BOSS_RESET_DELAY_MS = 8_000; // after defeat, boss stays gone this long
+const BOSS_SELF_HIT_IFRAME_MS = 1_200; // i-frames after a boss attack hits you
 
 // World bounds — reject moves outside a sane envelope to prevent griefing
 // the presence system with NaN/Infinity or absurd coordinates.
@@ -75,7 +92,10 @@ type ClientMsg =
   | { type: "move"; x: number; y: number; z: number; yaw: number; bank: number }
   | { type: "shoot"; x: number; y: number; z: number; dirX: number; dirY: number; dirZ: number }
   | { type: "hit"; targetId: string }
-  | { type: "toggle_pvp"; enabled: boolean };
+  | { type: "toggle_pvp"; enabled: boolean }
+  | { type: "engage_boss"; maxHp: number }
+  | { type: "boss_hit"; kind: "boss" | "minion" }
+  | { type: "boss_self_hit" };
 
 type ServerMsg =
   | { type: "sync"; pilots: PublicPilot[] }
@@ -86,7 +106,10 @@ type ServerMsg =
   | { type: "hit"; targetId: string; shooterId: string; newHp: number }
   | { type: "kill"; killerId: string; victimId: string; victimLogin: string; killerLogin: string; happyHour: boolean; killToken: string; killTokenExpiresAt: number }
   | { type: "respawn"; id: string; x: number; y: number; z: number; invulnUntil: number }
-  | { type: "pvp_state"; id: string; pvpEnabled: boolean; hp: number; invulnUntil: number; downedUntil: number; joinedAt: number };
+  | { type: "pvp_state"; id: string; pvpEnabled: boolean; hp: number; invulnUntil: number; downedUntil: number; joinedAt: number }
+  | { type: "boss_state"; active: boolean; hp: number; maxHp: number; phase: number }
+  | { type: "boss_defeated"; finalHitterId: string }
+  | { type: "boss_damage_receipt"; token: string; expiresAt: number };
 
 interface PublicPilot {
   id: string;
@@ -168,12 +191,106 @@ export default class FlyServer implements Party.Server {
   readonly pilots = new Map<string, PilotState>();
   readonly lastMove = new Map<string, number>();
 
+  // ─── Boss state (live event) ──────────────────────────────
+  boss: { active: boolean; hp: number; maxHp: number; phase: number } = {
+    active: false,
+    hp: 0,
+    maxHp: BOSS_DEFAULT_MAX_HP,
+    phase: 1,
+  };
+  // Per-connection pending damage awaiting a signed receipt
+  readonly bossDamage = new Map<string, { pending: number; pendingMinions: number }>();
+  // Per-connection i-frame timestamp for boss attacks hitting the player
+  readonly bossSelfHitAt = new Map<string, number>();
+  readonly bossShots = new Map<string, number[]>();
+  bossLastBroadcast = 0;
+  bossResetAt = 0;
+
   constructor(readonly room: Party.Room) {}
+
+  private bossPhaseFor(hp: number, maxHp: number): number {
+    const r = maxHp > 0 ? hp / maxHp : 0;
+    if (r > 0.75) return 1;
+    if (r > 0.5) return 2;
+    if (r > 0.25) return 3;
+    return 4;
+  }
+
+  private broadcastBossState(force = false) {
+    const now = Date.now();
+    if (!force && now - this.bossLastBroadcast < BOSS_BROADCAST_THROTTLE_MS) return;
+    this.bossLastBroadcast = now;
+    const msg: ServerMsg = {
+      type: "boss_state",
+      active: this.boss.active,
+      hp: this.boss.hp,
+      maxHp: this.boss.maxHp,
+      phase: this.boss.phase,
+    };
+    this.room.broadcast(JSON.stringify(msg));
+  }
+
+  private canBossShoot(id: string, now: number): boolean {
+    const arr = (this.bossShots.get(id) ?? []).filter((t) => t > now - BOSS_SHOT_WINDOW_MS);
+    if (arr.length >= BOSS_MAX_SHOTS_PER_WINDOW) {
+      this.bossShots.set(id, arr);
+      return false;
+    }
+    arr.push(now);
+    this.bossShots.set(id, arr);
+    return true;
+  }
+
+  // Issue a signed damage receipt to a connection for its pending chunk.
+  private async issueBossReceipt(connId: string) {
+    const track = this.bossDamage.get(connId);
+    if (!track || track.pending <= 0) return;
+    const pilot = this.pilots.get(connId);
+    if (!pilot || pilot.login === "anonymous") {
+      // Anonymous players can't be credited; drop their pending.
+      this.bossDamage.set(connId, { pending: 0, pendingMinions: 0 });
+      return;
+    }
+    const secret = (this.room.env as Record<string, unknown>).FORCE_PUSH_HMAC_SECRET as string | undefined;
+    if (!secret) {
+      console.warn("[BUG INVASION] FORCE_PUSH_HMAC_SECRET MISSING — damage not credited");
+      return;
+    }
+    const amt = track.pending;
+    const min = track.pendingMinions;
+    // Reset BEFORE awaiting to avoid double-issue under concurrency
+    this.bossDamage.set(connId, { pending: 0, pendingMinions: 0 });
+    const expiresAt = Date.now() + DAMAGE_RECEIPT_TTL_MS;
+    try {
+      const token = await signBossDamageToken(
+        { dln: pilot.login.toLowerCase(), amt, min, exp: expiresAt, nonce: randomNonce() },
+        secret,
+      );
+      const conn = this.room.getConnection(connId);
+      if (conn) {
+        const msg: ServerMsg = { type: "boss_damage_receipt", token, expiresAt };
+        conn.send(JSON.stringify(msg));
+      }
+    } catch (err) {
+      console.error("Failed to sign boss damage token", err);
+    }
+  }
 
   onConnect(conn: Connection, _ctx: ConnectionContext) { void _ctx;
     const pilots = [...this.pilots.entries()].map(([id, p]) => toPublic(id, p));
     const syncMsg: ServerMsg = { type: "sync", pilots };
     conn.send(JSON.stringify(syncMsg));
+    // Sync current boss state so late-joiners see the live HP immediately
+    if (this.boss.active) {
+      const bossMsg: ServerMsg = {
+        type: "boss_state",
+        active: this.boss.active,
+        hp: this.boss.hp,
+        maxHp: this.boss.maxHp,
+        phase: this.boss.phase,
+      };
+      conn.send(JSON.stringify(bossMsg));
+    }
   }
 
   onMessage(message: string, sender: Connection) {
@@ -222,6 +339,19 @@ export default class FlyServer implements Party.Server {
       return;
     }
 
+    // Boss engage is room-global state (no pilot needed) — handle it BEFORE the
+    // pilot guard, so it works even when engage_boss arrives before the player's
+    // join message (which was silently dropping it and leaving the boss inert).
+    if (msg.type === "engage_boss") {
+      if (!this.boss.active && now > this.bossResetAt) {
+        let maxHp = isFiniteNumber(msg.maxHp) ? Math.floor(msg.maxHp) : BOSS_DEFAULT_MAX_HP;
+        maxHp = Math.max(BOSS_MAX_HP_FLOOR, Math.min(BOSS_MAX_HP_CEILING, maxHp));
+        this.boss = { active: true, hp: maxHp, maxHp, phase: 1 };
+      }
+      this.broadcastBossState(true);
+      return;
+    }
+
     const pilot = this.pilots.get(id);
     if (!pilot) return;
 
@@ -262,6 +392,86 @@ export default class FlyServer implements Party.Server {
         joinedAt: pilot.joinedAt,
       };
       this.room.broadcast(JSON.stringify(stateMsg));
+      return;
+    }
+
+    if (msg.type === "boss_hit") {
+      if (!this.boss.active || this.boss.hp <= 0) return;
+      if (!pilot.pvpEnabled || isDowned(pilot, now)) return;
+      if (msg.kind !== "boss" && msg.kind !== "minion") return;
+      if (!this.canBossShoot(id, now)) return;
+      // Loose proximity check: player must be reasonably near the boss.
+      if (distance(pilot, BOSS_BASE_POS) > BOSS_HIT_MAX_DIST) return;
+
+      const dmg = msg.kind === "minion" ? BOSS_MINION_BONUS : BOSS_DAMAGE_PER_HIT;
+      this.boss.hp = Math.max(0, this.boss.hp - dmg);
+      const newPhase = this.bossPhaseFor(this.boss.hp, this.boss.maxHp);
+      const phaseChanged = newPhase !== this.boss.phase;
+      this.boss.phase = newPhase;
+
+      // Track pending damage for the receipt
+      const track = this.bossDamage.get(id) ?? { pending: 0, pendingMinions: 0 };
+      track.pending += dmg;
+      if (msg.kind === "minion") track.pendingMinions += 1;
+      this.bossDamage.set(id, track);
+
+      this.broadcastBossState(phaseChanged); // force broadcast on phase change
+
+      // Issue a receipt once enough damage accrued
+      if (track.pending >= DAMAGE_RECEIPT_THRESHOLD) {
+        void this.issueBossReceipt(id);
+      }
+
+      // Boss defeated
+      if (this.boss.hp <= 0) {
+        this.boss.active = false;
+        this.bossResetAt = now + BOSS_RESET_DELAY_MS;
+        // Flush all pending receipts so final damage is credited
+        for (const connId of this.bossDamage.keys()) {
+          void this.issueBossReceipt(connId);
+        }
+        const defeatMsg: ServerMsg = { type: "boss_defeated", finalHitterId: id };
+        this.room.broadcast(JSON.stringify(defeatMsg));
+        this.broadcastBossState(true);
+      }
+      return;
+    }
+
+    if (msg.type === "boss_self_hit") {
+      // A boss attack hit this player. Route into the SAME hp/destruction/
+      // respawn system as PvP, so the fly HUD hearts are the single health
+      // pool (no separate boss-lives counter).
+      if (!pilot.pvpEnabled || isDowned(pilot, now)) return;
+      const lastSelfHit = this.bossSelfHitAt.get(id) ?? 0;
+      if (now - lastSelfHit < BOSS_SELF_HIT_IFRAME_MS) return; // i-frames
+      this.bossSelfHitAt.set(id, now);
+
+      pilot.hp = Math.max(0, pilot.hp - 1);
+      if (pilot.hp > 0) {
+        const hitMsg: ServerMsg = { type: "hit", targetId: id, shooterId: id, newHp: pilot.hp };
+        this.room.broadcast(JSON.stringify(hitMsg));
+        return;
+      }
+
+      // Destroyed by the boss → downed + respawn-teleport (reuses PvP flow,
+      // but no kill credit since the killer is the boss).
+      pilot.downedUntil = now + RESPAWN_DELAY_MS;
+      const downMsg: ServerMsg = { type: "hit", targetId: id, shooterId: id, newHp: 0 };
+      this.room.broadcast(JSON.stringify(downMsg));
+      setTimeout(() => {
+        const t = this.pilots.get(id);
+        if (!t) return;
+        const respawnAt = Date.now();
+        const pos = respawnPositionFar(t);
+        t.x = pos.x;
+        t.y = pos.y;
+        t.z = pos.z;
+        t.hp = INITIAL_HP;
+        t.downedUntil = 0;
+        t.invulnUntil = respawnAt + INVULN_AFTER_SPAWN_MS;
+        const respawnMsg: ServerMsg = { type: "respawn", id, x: t.x, y: t.y, z: t.z, invulnUntil: t.invulnUntil };
+        this.room.broadcast(JSON.stringify(respawnMsg));
+      }, RESPAWN_DELAY_MS);
       return;
     }
 
@@ -420,8 +630,14 @@ export default class FlyServer implements Party.Server {
 
   onClose(conn: Connection) {
     const id = conn.id;
+    // Flush any pending boss damage before the connection is gone. The
+    // receipt send will no-op if the socket is already closed, but if the
+    // player reconnects quickly the threshold-based issuance covers it.
+    void this.issueBossReceipt(id);
     this.pilots.delete(id);
     this.lastMove.delete(id);
+    this.bossDamage.delete(id);
+    this.bossShots.delete(id);
     const leaveMsg: ServerMsg = { type: "leave", id };
     this.room.broadcast(JSON.stringify(leaveMsg));
   }

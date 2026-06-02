@@ -1091,6 +1091,166 @@ export const CrownItem = memo(function CrownItem({
   );
 });
 
+// ─── Companion Duck (crown zone — Bug Invasion gift) ────────
+// A voxel rubber duck that orbits the building. Three prestige variants
+// share one model; `variant` picks the finish + animation:
+//   companion_duck     → yellow common
+//   duck_combatant     → crimson rare
+//   duck_gold_animated → radiant gold legendary (faster orbit + glow pulse)
+type DuckVariant = "companion_duck" | "duck_combatant" | "duck_gold_animated";
+
+const DUCK_FINISH: Record<DuckVariant, { body: string; shadow: string; belly: string; beak: string; emissive: number; animated: boolean }> = {
+  companion_duck:     { body: "#ffd23a", shadow: "#c98a00", belly: "#ffe98a", beak: "#ff8a1e", emissive: 0.3, animated: false },
+  duck_combatant:     { body: "#cf3327", shadow: "#5e120c", belly: "#9e241b", beak: "#ffc23a", emissive: 0.4, animated: false },
+  duck_gold_animated: { body: "#ffe14d", shadow: "#c98a00", belly: "#fff0a8", beak: "#ff7a00", emissive: 1.0, animated: true },
+};
+
+export const CompanionDuck = memo(function CompanionDuck({
+  height,
+  width,
+  depth,
+  variant = "companion_duck",
+}: {
+  height: number;
+  width: number;
+  depth: number;
+  variant?: DuckVariant;
+}) {
+  const duckRef = useRef<THREE.Group>(null);
+  const bodyMatRef = useRef<THREE.MeshStandardMaterial>(null);
+  const flameGroupRef = useRef<THREE.Group>(null);
+  const flameMatRef = useRef<THREE.MeshStandardMaterial>(null);
+  const frameCount = useRef(0);
+  const orbitRadius = Math.max(width, depth) * 0.5 + 3;
+  const orbitY = height + 7;
+  const finish = DUCK_FINISH[variant] ?? DUCK_FINISH.companion_duck;
+  const fierce = variant === "duck_combatant";
+  const orbitSpeed = finish.animated ? 0.7 : 0.45;
+
+  // Body material props (shared by all body-colored parts).
+  const bodyProps = { color: finish.body, emissive: finish.shadow, emissiveIntensity: finish.emissive, flatShading: true, toneMapped: !finish.animated } as const;
+
+  useFrame((state) => {
+    if (!duckRef.current) return;
+    frameCount.current++;
+    if (frameCount.current % 2 !== 0) return; // ~30fps update is plenty
+    const t = state.clock.elapsedTime;
+    const angle = t * orbitSpeed;
+    duckRef.current.position.x = Math.cos(angle) * orbitRadius;
+    duckRef.current.position.z = Math.sin(angle) * orbitRadius;
+    duckRef.current.position.y = orbitY + Math.sin(t * 1.5) * 1.0;
+    duckRef.current.rotation.y = -angle + Math.PI / 2;
+    duckRef.current.rotation.z = Math.sin(t * 3) * 0.07; // gentle waddle
+    // Legendary: pulsing glow + flickering flame crown
+    if (finish.animated) {
+      if (bodyMatRef.current) bodyMatRef.current.emissiveIntensity = finish.emissive + Math.sin(t * 4) * 0.4;
+      if (flameGroupRef.current) flameGroupRef.current.scale.y = 1 + Math.sin(t * 13) * 0.28;
+      if (flameMatRef.current) flameMatRef.current.emissiveIntensity = 1.6 + Math.sin(t * 16) * 0.7;
+    }
+  });
+
+  return (
+    <group ref={duckRef} position={[orbitRadius, orbitY, 0]} scale={2.6}>
+      {/* ── Body (rounded rubber-duck silhouette) ── */}
+      <mesh geometry={_box} scale={[1.3, 0.78, 1.15]}>
+        <meshStandardMaterial ref={bodyMatRef} {...bodyProps} />
+      </mesh>
+      <mesh position={[0, -0.05, 0.5]} geometry={_box} scale={[1.05, 0.6, 0.55]}>
+        <meshStandardMaterial {...bodyProps} />
+      </mesh>
+      <mesh position={[0, 0.22, -0.5]} geometry={_box} scale={[0.95, 0.62, 0.55]}>
+        <meshStandardMaterial {...bodyProps} />
+      </mesh>
+      {/* Up-tilted tail */}
+      <mesh position={[0, 0.5, -0.82]} rotation={[-0.35, 0, 0]} geometry={_box} scale={[0.5, 0.42, 0.4]}>
+        <meshStandardMaterial {...bodyProps} />
+      </mesh>
+      {/* Belly */}
+      <mesh position={[0, -0.44, 0.08]} geometry={_box} scale={[1.06, 0.32, 0.92]}>
+        <meshStandardMaterial color={finish.belly} flatShading toneMapped={!finish.animated} />
+      </mesh>
+      {/* Wings */}
+      <mesh position={[-0.72, 0.02, -0.02]} geometry={_box} scale={[0.16, 0.44, 0.62]}>
+        <meshStandardMaterial color={finish.shadow} emissive={finish.shadow} emissiveIntensity={finish.emissive * 0.6} flatShading toneMapped={!finish.animated} />
+      </mesh>
+      <mesh position={[0.72, 0.02, -0.02]} geometry={_box} scale={[0.16, 0.44, 0.62]}>
+        <meshStandardMaterial color={finish.shadow} emissive={finish.shadow} emissiveIntensity={finish.emissive * 0.6} flatShading toneMapped={!finish.animated} />
+      </mesh>
+
+      {/* ── Head ── */}
+      <mesh position={[0, 0.62, 0.3]} geometry={_box} scale={[0.8, 0.72, 0.78]}>
+        <meshStandardMaterial {...bodyProps} />
+      </mesh>
+      <mesh position={[0, 0.96, 0.3]} geometry={_box} scale={[0.62, 0.26, 0.62]}>
+        <meshStandardMaterial {...bodyProps} />
+      </mesh>
+
+      {/* ── Beak (upper + lower bill, forward = +Z) ── */}
+      <mesh position={[0, 0.6, 0.74]} geometry={_box} scale={[0.44, 0.22, 0.42]}>
+        <meshStandardMaterial color={finish.beak} emissive={finish.beak} emissiveIntensity={0.4} flatShading />
+      </mesh>
+      <mesh position={[0, 0.48, 0.76]} geometry={_box} scale={[0.36, 0.09, 0.32]}>
+        <meshStandardMaterial color={finish.beak} emissive={finish.beak} emissiveIntensity={0.25} flatShading />
+      </mesh>
+
+      {/* ── Eyes (white + pupil) ── */}
+      <mesh position={[-0.24, 0.74, 0.58]} geometry={_box} scale={[0.17, 0.21, 0.12]}>
+        <meshStandardMaterial color="#ffffff" emissive="#ffffff" emissiveIntensity={0.15} flatShading />
+      </mesh>
+      <mesh position={[0.24, 0.74, 0.58]} geometry={_box} scale={[0.17, 0.21, 0.12]}>
+        <meshStandardMaterial color="#ffffff" emissive="#ffffff" emissiveIntensity={0.15} flatShading />
+      </mesh>
+      <mesh position={[-0.24, 0.72, 0.66]} geometry={_box} scale={[0.1, 0.12, 0.1]}>
+        <meshBasicMaterial color="#0c0c0c" toneMapped={false} />
+      </mesh>
+      <mesh position={[0.24, 0.72, 0.66]} geometry={_box} scale={[0.1, 0.12, 0.1]}>
+        <meshBasicMaterial color="#0c0c0c" toneMapped={false} />
+      </mesh>
+
+      {/* ── Combatant: battle crest, angry brows, eye scar ── */}
+      {fierce && (
+        <>
+          <mesh position={[0, 1.08, 0.46]} geometry={_box} scale={[0.12, 0.4, 0.14]}>
+            <meshStandardMaterial color="#ff3b2b" emissive="#b01408" emissiveIntensity={0.5} flatShading />
+          </mesh>
+          <mesh position={[0, 1.14, 0.3]} geometry={_box} scale={[0.13, 0.56, 0.14]}>
+            <meshStandardMaterial color="#ff3b2b" emissive="#b01408" emissiveIntensity={0.5} flatShading />
+          </mesh>
+          <mesh position={[0, 1.06, 0.14]} geometry={_box} scale={[0.12, 0.38, 0.14]}>
+            <meshStandardMaterial color="#ff3b2b" emissive="#b01408" emissiveIntensity={0.5} flatShading />
+          </mesh>
+          {/* Angry brows */}
+          <mesh position={[-0.24, 0.92, 0.62]} rotation={[0, 0, -0.5]} geometry={_box} scale={[0.28, 0.08, 0.1]}>
+            <meshStandardMaterial color="#1a0606" flatShading />
+          </mesh>
+          <mesh position={[0.24, 0.92, 0.62]} rotation={[0, 0, 0.5]} geometry={_box} scale={[0.28, 0.08, 0.1]}>
+            <meshStandardMaterial color="#1a0606" flatShading />
+          </mesh>
+          {/* Eye scar */}
+          <mesh position={[0.24, 0.74, 0.67]} rotation={[0, 0, 0.4]} geometry={_box} scale={[0.05, 0.3, 0.06]}>
+            <meshStandardMaterial color="#f2d2c4" flatShading />
+          </mesh>
+        </>
+      )}
+
+      {/* ── Legendary: flickering flame crown ── */}
+      {finish.animated && (
+        <group ref={flameGroupRef} position={[0, 1.18, 0.3]}>
+          {[-0.28, 0, 0.28].map((x, i) => (
+            <mesh key={i} position={[x, i === 1 ? 0.12 : 0, 0]} geometry={_box} scale={[0.16, i === 1 ? 0.6 : 0.42, 0.16]}>
+              {i === 1 ? (
+                <meshStandardMaterial ref={flameMatRef} color="#ffd23a" emissive="#ff7a1e" emissiveIntensity={1.6} flatShading toneMapped={false} />
+              ) : (
+                <meshStandardMaterial color="#ff9a2e" emissive="#ff5a10" emissiveIntensity={1.3} flatShading toneMapped={false} />
+              )}
+            </mesh>
+          ))}
+        </group>
+      )}
+    </group>
+  );
+});
+
 // ─── Pool Party (roof zone — premium) ───────────────────────
 
 export const PoolParty = memo(function PoolParty({

@@ -6,6 +6,7 @@ import { useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import type { Session } from "@supabase/supabase-js";
 import { createBrowserSupabase } from "@/lib/supabase";
+import { signInWithGitHub, isLocalSupabase } from "@/lib/sign-in";
 import {
   generateCityLayout,
   DISTRICT_NAMES,
@@ -68,6 +69,9 @@ import {
 const CityCanvas = dynamic(() => import("@/components/CityCanvas"), {
   ssr: false,
 });
+
+const BossEventHUD = dynamic(() => import("@/components/BossEventHUD"), { ssr: false });
+const BossInvasionCard = dynamic(() => import("@/components/BossInvasionCard"), { ssr: false });
 
 const ActivityPanel = dynamic(() => import("@/components/ActivityPanel"), { ssr: false });
 const DailiesWidget = dynamic(() => import("@/components/DailiesWidget"), { ssr: false });
@@ -397,6 +401,81 @@ function HomeContent({ resolvedSponsors }: HomeContentProps) {
   const userParam = searchParams.get("user");
   const giftedParam = searchParams.get("gifted");
 
+  // Real live event fetched from the server (the production path).
+  // Polls /api/events/active so the boss appears/disappears with the
+  // scheduled window managed by the lifecycle cron.
+  const [liveEvent, setLiveEvent] = useState<
+    { id: string; maxHp: number; variant: "duck" | "cafetopia"; participants: number } | null
+  >(null);
+  const [liveLeaderboard, setLiveLeaderboard] = useState<
+    { rank: number; login: string; damage: number; minions: number }[]
+  >([]);
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch("/api/events/active");
+        const data = await res.json();
+        if (cancelled) return;
+        if (data.live && data.event) {
+          const variant = (data.event.theme_config?.variant === "cafetopia" ? "cafetopia" : "duck") as
+            | "duck"
+            | "cafetopia";
+          setLiveEvent({ id: data.event.id, maxHp: data.event.boss_max_hp, variant, participants: data.participants ?? 0 });
+          setLiveLeaderboard(Array.isArray(data.leaderboard) ? data.leaderboard : []);
+        } else {
+          setLiveEvent(null);
+          setLiveLeaderboard([]);
+        }
+      } catch { /* ignore */ }
+    };
+    poll();
+    const interval = setInterval(poll, 12000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
+  // Fire-and-forget client analytics ping (allowlisted events only)
+  const track = useCallback((eventName: string, props: Record<string, unknown> = {}) => {
+    try {
+      let anon = localStorage.getItem("gitcity_anon_id");
+      if (!anon) {
+        anon = crypto.randomUUID();
+        localStorage.setItem("gitcity_anon_id", anon);
+      }
+      fetch("/api/track", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ event_name: eventName, anonymous_id: anon, props }),
+        keepalive: true,
+      }).catch(() => {});
+    } catch { /* ignore */ }
+  }, []);
+
+  // Boss invasion resolution:
+  //   ?boss=X&bossPhase=N  → static preview of a single phase (visual only, dev)
+  //   ?boss=X              → forced local POC simulation (dev/testing)
+  //   live event from API  → real server-authoritative event
+  const bossPreview = useMemo(():
+    | { variant: "duck" | "cafetopia"; mode: "static"; phase: 1 | 2 | 3 | 4 }
+    | { variant: "duck" | "cafetopia"; mode: "live"; eventId?: string; maxHp?: number; serverAuthoritative?: boolean }
+    | null => {
+    const v = searchParams.get("boss");
+    if (v === "duck" || v === "cafetopia") {
+      if (searchParams.has("bossPhase")) {
+        const raw = parseInt(searchParams.get("bossPhase") ?? "1", 10);
+        const phase = (raw >= 1 && raw <= 4 ? raw : 1) as 1 | 2 | 3 | 4;
+        return { variant: v, mode: "static", phase };
+      }
+      // URL-forced local POC (no server) — for solo testing without a live event
+      return { variant: v, mode: "live" };
+    }
+    // Production: a real scheduled event is live
+    if (liveEvent) {
+      return { variant: liveEvent.variant, mode: "live", eventId: liveEvent.id, maxHp: liveEvent.maxHp, serverAuthoritative: true };
+    }
+    return null;
+  }, [searchParams, liveEvent]);
+
   const [username, setUsername] = useState("");
   const failedUsernamesRef = useRef<Map<string, string>>(new Map()); // username -> error code
   const [buildings, setBuildings] = useState<CityBuilding[]>([]);
@@ -422,6 +501,25 @@ function HomeContent({ resolvedSponsors }: HomeContentProps) {
   } | null>(null);
   const [flyMode, setFlyMode] = useState(false);
   const [flyVehicle, setFlyVehicle] = useState<string>("airplane");
+
+  // Analytics: raid_viewed once when a real live event appears; raid_joined
+  // once when the player enters fly mode during it. Drives participation
+  // rate + the participant-vs-non retention split.
+  const trackedViewRef = useRef<string | null>(null);
+  const trackedJoinRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (bossPreview?.mode !== "live" || !bossPreview.serverAuthoritative || !bossPreview.eventId) return;
+    const eid = bossPreview.eventId;
+    if (trackedViewRef.current !== eid) {
+      trackedViewRef.current = eid;
+      track("raid_viewed", { event_id: eid });
+    }
+    if (flyMode && trackedJoinRef.current !== eid) {
+      trackedJoinRef.current = eid;
+      track("raid_joined", { event_id: eid });
+    }
+  }, [bossPreview, flyMode, track]);
+
   const [introMode, setIntroMode] = useState(false);
   const [introPhase, setIntroPhase] = useState(-1); // -1 = not started, 0-3 = text phases, 4 = done
   const [exploreMode, setExploreMode] = useState(false);
@@ -748,6 +846,10 @@ function HomeContent({ resolvedSponsors }: HomeContentProps) {
     reportHit: flyReportHit,
     togglePvp: flyTogglePvp,
     pendingRespawnRef: flyPendingRespawnRef,
+    bossStateRef: flyBossStateRef,
+    engageBoss: flyEngageBoss,
+    sendBossHit: flySendBossHit,
+    sendBossSelfHit: flySendBossSelfHit,
   } = useFlyPresence(
     flyMode,
     authLogin,
@@ -926,10 +1028,7 @@ function HomeContent({ resolvedSponsors }: HomeContentProps) {
         }
       }
     } catch { /* ignore */ }
-    await supabase.auth.signInWithOAuth({
-      provider: "github",
-      options: { redirectTo },
-    });
+    await signInWithGitHub(supabase, redirectTo);
   }, []);
 
   // Fetch activity feed on mount + poll every 60s
@@ -1326,7 +1425,19 @@ function HomeContent({ resolvedSponsors }: HomeContentProps) {
       } catch { /* fall through to chunked */ }
     }
 
-    // Snapshot is the only data source. No chunked API fallback.
+    // Local dev has no storage snapshot — read straight from the DB so the
+    // city renders without a snapshot-generation step. Local-only.
+    if (allDevs.length === 0 && isLocalSupabase()) {
+      try {
+        const res = await fetch("/api/city?from=0&to=1000");
+        if (res.ok) {
+          const data = await res.json();
+          allDevs = data.developers ?? [];
+          cityStats = data.stats ?? null;
+          dropsPayload = data._d ?? [];
+        }
+      } catch { /* ignore */ }
+    }
 
     if (allDevs.length === 0) return null;
 
@@ -1440,6 +1551,20 @@ function HomeContent({ resolvedSponsors }: HomeContentProps) {
             dropsPayload = snapshot._d ?? [];
           }
         } catch { /* snapshot failed */ }
+
+        // Local dev has no storage snapshot — read straight from the DB so the
+        // city renders without a snapshot-generation step. Local-only.
+        if ((!allDevs || allDevs.length === 0) && isLocalSupabase()) {
+          try {
+            const res = await fetch("/api/city?from=0&to=1000");
+            if (res.ok) {
+              const data = await res.json();
+              allDevs = data.developers ?? [];
+              cityStats = data.stats ?? null;
+              dropsPayload = data._d ?? [];
+            }
+          } catch { /* ignore */ }
+        }
 
         setLoadProgress(30);
 
@@ -2152,6 +2277,9 @@ function HomeContent({ resolvedSponsors }: HomeContentProps) {
 
   // City energy: devs coding -> city lights up. 0 devs = nearly dark, 5+ = full brightness
   const cityEnergy = useMemo(() => {
+    // Local dev has no live VSCode coding presence, so codingCount is always 0
+    // and the city would sit nearly dark. Keep the lights on for development.
+    if (isLocalSupabase()) return 1.0;
     if (codingCount === 0) return 0.05;
     if (codingCount === 1) return 0.35;
     if (codingCount === 2) return 0.55;
@@ -2251,8 +2379,12 @@ function HomeContent({ resolvedSponsors }: HomeContentProps) {
 
   return (
     <main className="relative min-h-screen overflow-hidden bg-bg font-pixel uppercase text-warm">
+      {/* Boss Invasion HUD overlay (only when live event mode) */}
+      {bossPreview?.mode === "live" && <BossEventHUD flyMode={flyMode} accentColor={theme.accent} shadowColor={theme.shadow} leaderboard={liveLeaderboard} participants={liveEvent?.participants ?? 0} selfLogin={authLogin} />}
+
       {/* 3D Canvas */}
       <CityCanvas
+        bossPreview={bossPreview}
         onCompareCinematicEnd={() => setCompareCinematicPlaying(false)}
         buildings={buildings}
         plazas={plazas}
@@ -2530,6 +2662,10 @@ function HomeContent({ resolvedSponsors }: HomeContentProps) {
         flyOnReportHit={flyReportHit}
         flyPvpEnabled={flyPvpEnabled}
         flyPendingRespawnRef={flyPendingRespawnRef}
+        flyBossStateRef={flyBossStateRef}
+        flyEngageBoss={flyEngageBoss}
+        flySendBossHit={flySendBossHit}
+        flySendBossSelfHit={flySendBossSelfHit}
       />
       {flyMode && (
         <PvPHud
@@ -3774,8 +3910,24 @@ function HomeContent({ resolvedSponsors }: HomeContentProps) {
             </div>
 
             {/* Milestone progress banner — hidden on mobile to reduce clutter */}
+            {/* During live boss event, the BossInvasionCard takes over this slot */}
             <div className="hidden sm:flex sm:justify-center w-full">
-              {MILESTONE_MODE === "stars" ? (
+              {bossPreview?.mode === "live" ? (
+                <BossInvasionCard
+                  accentColor={theme.accent}
+                  shadowColor={theme.shadow}
+                  participants={liveEvent?.participants ?? 0}
+                  onJoin={() => {
+                    setFocusedBuilding(null);
+                    setFlyMode(true);
+                    setFlyScore({ score: 0, earned: 0, combo: 0, collected: 0, maxCombo: 1 });
+                    flyStartTime.current = Date.now();
+                    flyPausedAt.current = 0;
+                    flyTotalPauseMs.current = 0;
+                    setFlyElapsedSec(0);
+                  }}
+                />
+              ) : MILESTONE_MODE === "stars" ? (
                 // ── GitHub Stars mode ──
                 (() => {
                   if (starCount == null) return null;

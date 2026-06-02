@@ -1,5 +1,6 @@
 "use client";
 
+import "@/lib/silenceThreeClockWarning";
 import { useRef, useEffect, useEffectEvent, useState, useMemo, useCallback } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, useGLTF, Stats, PerformanceMonitor } from "@react-three/drei";
@@ -32,6 +33,8 @@ import RemotePilots from "./RemotePilots";
 import type { RemotePilot, ActiveProjectile, SelfPvpState, PendingRespawn } from "@/lib/useFlyPresence";
 import ProjectileSwarm from "./ProjectileSwarm";
 import { usePerfMode } from "@/lib/perfMode";
+import BossPreview, { type BossVariant, type Phase as BossPhase } from "./BossPreview";
+import BossEvent from "./BossEvent";
 
 // ─── Theme Definitions ───────────────────────────────────────
 
@@ -2256,6 +2259,14 @@ interface Props {
   flyPvpEnabled?: boolean;
   flyPendingRespawnRef?: React.MutableRefObject<PendingRespawn | null>;
   onCameraMove?: (x: number, z: number, tx: number, tz: number) => void;
+  bossPreview?:
+    | { variant: BossVariant; mode: "static"; phase: BossPhase }
+    | { variant: BossVariant; mode: "live"; eventId?: string; maxHp?: number; serverAuthoritative?: boolean }
+    | null;
+  flyBossStateRef?: React.MutableRefObject<import("@/lib/useFlyPresence").BossLiveState>;
+  flyEngageBoss?: (maxHp: number) => void;
+  flySendBossHit?: (kind: "boss" | "minion") => void;
+  flySendBossSelfHit?: () => void;
 }
 
 // Dynamically adjust scene exposure based on city energy (devs coding)
@@ -2279,7 +2290,7 @@ function CityExposure({ cityEnergy }: { cityEnergy: number }) {
 // Downtown has no plaza, so district plazas start at index 0
 const RABBIT_PLAZA_INDICES = [0, 1, 3, 6, 9];
 
-export default function CityCanvas({ buildings, plazas, decorations, river, bridges, flyMode, flyVehicle, onExitFly, onCollect, themeIndex, onHud, onPause, focusedBuilding, focusedBuildingB, accentColor, onClearFocus, onBuildingClick, onFocusInfo, flyPauseSignal, flyHasOverlay, flyStartPaused, isMobile, onJoystickState, flyBoostActive, flyBrakeActive, skyAds, onAdClick, onAdViewed, introMode, onIntroEnd, raidPhase, raidData, raidAttacker, raidDefender, onRaidPhaseComplete, onLandmarkClick, onEArcadeClick, onSponsorClick, sponsorFocusPos, activeSponsorSlug, resolvedSponsors, rabbitSighting, onRabbitCaught, rabbitCinematic, onRabbitCinematicEnd, rabbitCinematicTarget, ghostPreviewLogin, holdRise, celebrationActive, wallpaperMode, wallpaperSpeed, liveByLogin, cityEnergy, onCompareCinematicEnd, onFlyMove, flyPilotsRef, flyProjectilesRef, flySelfStateRef, flySelfId, flyOnShoot, flyOnReportHit, flyPvpEnabled, flyPendingRespawnRef, onCameraMove }: Props) {
+export default function CityCanvas({ buildings, plazas, decorations, river, bridges, flyMode, flyVehicle, onExitFly, onCollect, themeIndex, onHud, onPause, focusedBuilding, focusedBuildingB, accentColor, onClearFocus, onBuildingClick, onFocusInfo, flyPauseSignal, flyHasOverlay, flyStartPaused, isMobile, onJoystickState, flyBoostActive, flyBrakeActive, skyAds, onAdClick, onAdViewed, introMode, onIntroEnd, raidPhase, raidData, raidAttacker, raidDefender, onRaidPhaseComplete, onLandmarkClick, onEArcadeClick, onSponsorClick, sponsorFocusPos, activeSponsorSlug, resolvedSponsors, rabbitSighting, onRabbitCaught, rabbitCinematic, onRabbitCinematicEnd, rabbitCinematicTarget, ghostPreviewLogin, holdRise, celebrationActive, wallpaperMode, wallpaperSpeed, liveByLogin, cityEnergy, onCompareCinematicEnd, onFlyMove, flyPilotsRef, flyProjectilesRef, flySelfStateRef, flySelfId, flyOnShoot, flyOnReportHit, flyPvpEnabled, flyPendingRespawnRef, onCameraMove, bossPreview, flyBossStateRef, flyEngageBoss, flySendBossHit, flySendBossSelfHit }: Props) {
   const sponsors = resolvedSponsors ?? [];
   const [isCompareCinematicPlaying, setIsCompareCinematicPlaying] = useState(false);
   const prevComparePairRef = useRef<string>("");
@@ -2474,6 +2485,31 @@ export default function CityCanvas({ buildings, plazas, decorations, river, brid
         />
       ))}
       <FounderSpire onClick={blockCityClicks ? () => { } : (onLandmarkClick ?? (() => { }))} />
+
+      {/* Boss Invasion:
+            ?boss=X                  → live event (BossEvent: shoot, damage, attacks, victory)
+            ?boss=X&bossPhase=N      → static preview at phase N (just the visual)  */}
+      {bossPreview && bossPreview.mode === "static" && (
+        <BossPreview
+          variant={bossPreview.variant}
+          phase={bossPreview.phase}
+          position={[0, 800, 0]}
+          scale={15}
+          rotationY={bossPreview.variant === "duck" ? Math.PI : 0}
+        />
+      )}
+      {bossPreview && bossPreview.mode === "live" && (
+        <BossEvent
+          variant={bossPreview.variant}
+          projectilesRef={flyProjectilesRef}
+          serverAuthoritative={bossPreview.serverAuthoritative}
+          maxHp={bossPreview.maxHp}
+          bossStateRef={flyBossStateRef}
+          engageBoss={flyEngageBoss}
+          sendBossHit={flySendBossHit}
+          sendBossSelfHit={flySendBossSelfHit}
+        />
+      )}
 
       {!wallpaperMode && celebrationActive && <CelebrationEffect cityRadius={cityRadius} />}
 

@@ -20,6 +20,7 @@ import {
   NeonTrim,
   SatelliteDish,
   CrownItem,
+  CompanionDuck,
   PoolParty,
   HologramRing,
   LightningAura,
@@ -363,6 +364,9 @@ export function FocusBeacon({ height, width, depth, accentColor }: { height: num
 // ─── Main Building Component ─────────────────────────────────
 
 // ─── Loadout-Aware Effect Rendering ──────────────────────────
+// NOTE: the item_id → visual mapping below is mirrored in
+// cosmetics/itemRenderers.ts (buildingItemVisual), which the shop and admin
+// gallery render through. Keep the two in sync when adding an item.
 
 export const BuildingItemEffects = memo(function BuildingItemEffects({ building, accentColor, focused }: { building: CityBuilding; accentColor: string; focused?: boolean }) {
   const { height, width, depth, owned_items, loadout, billboard_images } = building;
@@ -447,6 +451,15 @@ export const BuildingItemEffects = memo(function BuildingItemEffects({ building,
       )}
       {shouldRenderZone("github_star") && (
         <GitHubStar height={height} width={width} depth={depth} color={accentColor} />
+      )}
+      {shouldRenderZone("companion_duck") && (
+        <CompanionDuck height={height} width={width} depth={depth} variant="companion_duck" />
+      )}
+      {shouldRenderZone("duck_combatant") && (
+        <CompanionDuck height={height} width={width} depth={depth} variant="duck_combatant" />
+      )}
+      {shouldRenderZone("duck_gold_animated") && (
+        <CompanionDuck height={height} width={width} depth={depth} variant="duck_gold_animated" />
       )}
       {/* White rabbit: always renders for completers, not tied to loadout */}
       {building.rabbit_completed && (

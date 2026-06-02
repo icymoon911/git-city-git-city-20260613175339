@@ -87,7 +87,20 @@ type ServerMsg =
   | { type: "hit"; targetId: string; shooterId: string; newHp: number }
   | { type: "kill"; killerId: string; victimId: string; victimLogin: string; killerLogin: string; happyHour: boolean; killToken: string; killTokenExpiresAt: number }
   | { type: "respawn"; id: string; x: number; y: number; z: number; invulnUntil: number }
-  | { type: "pvp_state"; id: string; pvpEnabled: boolean; hp: number; invulnUntil: number; downedUntil: number; joinedAt: number };
+  | { type: "pvp_state"; id: string; pvpEnabled: boolean; hp: number; invulnUntil: number; downedUntil: number; joinedAt: number }
+  | { type: "boss_state"; active: boolean; hp: number; maxHp: number; phase: number }
+  | { type: "boss_defeated"; finalHitterId: string }
+  | { type: "boss_damage_receipt"; token: string; expiresAt: number };
+
+export interface BossLiveState {
+  active: boolean;
+  hp: number;
+  maxHp: number;
+  phase: number;
+  defeated: boolean;
+  finalHitWasSelf: boolean;
+  updatedAt: number;
+}
 
 const SEND_INTERVAL_MS = 100;
 const PROJECTILE_LIFE_MS = 1500;
@@ -123,6 +136,10 @@ export function useFlyPresence(
   sendShoot: (x: number, y: number, z: number, dirX: number, dirY: number, dirZ: number) => void;
   reportHit: (targetId: string) => void;
   togglePvp: (enabled: boolean) => void;
+  bossStateRef: React.MutableRefObject<BossLiveState>;
+  engageBoss: (maxHp: number) => void;
+  sendBossHit: (kind: "boss" | "minion") => void;
+  sendBossSelfHit: () => void;
 } {
   const pilotsRef = useRef<Map<string, RemotePilot>>(new Map());
   const projectilesRef = useRef<Map<string, ActiveProjectile>>(new Map());
@@ -140,6 +157,15 @@ export function useFlyPresence(
     lastHitConfirmedAt: 0,
     lastDamageAt: 0,
     killFeed: [],
+  });
+  const bossStateRef = useRef<BossLiveState>({
+    active: false,
+    hp: 0,
+    maxHp: 0,
+    phase: 1,
+    defeated: false,
+    finalHitWasSelf: false,
+    updatedAt: 0,
   });
   const socketRef = useRef<PartySocket | null>(null);
   const lastSendRef = useRef(0);
@@ -273,6 +299,12 @@ export function useFlyPresence(
             selfStateRef.current.lastAttackerX = attacker.x;
             selfStateRef.current.lastAttackerZ = attacker.z;
           }
+          // hp 0 via a plain `hit` only happens on the boss self-hit path
+          // (PvP kills use the `kill` message). Enter downed so the existing
+          // fly destruction/respawn kicks in; server sends `respawn` shortly.
+          if (msg.newHp <= 0 && selfStateRef.current.downedUntil <= Date.now()) {
+            selfStateRef.current.downedUntil = Date.now() + 5000;
+          }
         } else {
           const target = pilotsRef.current.get(msg.targetId);
           if (target) target.hp = msg.newHp;
@@ -376,6 +408,34 @@ export function useFlyPresence(
           }
         }
       }
+
+      // ─── Boss event messages ──────────────────────────────
+      if (msg.type === "boss_state") {
+        bossStateRef.current.active = msg.active;
+        bossStateRef.current.hp = msg.hp;
+        bossStateRef.current.maxHp = msg.maxHp;
+        bossStateRef.current.phase = msg.phase;
+        bossStateRef.current.updatedAt = Date.now();
+        if (msg.active) bossStateRef.current.defeated = false;
+      }
+
+      if (msg.type === "boss_defeated") {
+        bossStateRef.current.active = false;
+        bossStateRef.current.hp = 0;
+        bossStateRef.current.defeated = true;
+        bossStateRef.current.finalHitWasSelf = !!meId && msg.finalHitterId === meId;
+        bossStateRef.current.updatedAt = Date.now();
+      }
+
+      if (msg.type === "boss_damage_receipt") {
+        // Carry the server-signed receipt to the credit API. The API
+        // verifies the HMAC and credits the live event idempotently.
+        fetch("/api/events/credit-damage", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ damage_token: msg.token }),
+        }).catch(() => { /* silent — idempotent server side */ });
+      }
     });
 
     const pilots = pilotsRef.current;
@@ -462,6 +522,27 @@ export function useFlyPresence(
     }
   }, []);
 
+  const engageBoss = useCallback((maxHp: number) => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "engage_boss", maxHp }));
+  }, []);
+
+  const sendBossHit = useCallback((kind: "boss" | "minion") => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!flyingRef.current) return;
+    ws.send(JSON.stringify({ type: "boss_hit", kind }));
+  }, []);
+
+  // A boss attack hit the player — routes into the shared fly HP/respawn system.
+  const sendBossSelfHit = useCallback(() => {
+    const ws = socketRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!flyingRef.current) return;
+    ws.send(JSON.stringify({ type: "boss_self_hit" }));
+  }, []);
+
   return {
     pilotsRef,
     projectilesRef,
@@ -473,5 +554,9 @@ export function useFlyPresence(
     sendShoot,
     reportHit,
     togglePvp,
+    bossStateRef,
+    engageBoss,
+    sendBossHit,
+    sendBossSelfHit,
   };
 }
